@@ -459,22 +459,17 @@ class ProactiveChatPlugin(MaiBotPlugin):
         intent_text = self._build_intent_text(stream, whitelist_entry, snapshot, force=force)
 
         try:
+            # 这里刻意把 reason/priority/metadata 都传空:
+            # 主程序 enqueue_proactive_task 会 if 判这三个字段非空才拼到 task visible_text 里,
+            # 全部传空 → 省下三行"触发原因/优先级/附加信息"在 chat_history 里的 token 浪费。
+            # force/snapshot 这些信号已经在 intent_text 里写过了,没必要再以 JSON 形式重复一遍。
             result = await self.ctx.call_capability(
                 "maisaka.proactive.trigger",
                 stream_id=stream_id,
                 intent=intent_text,
-                reason=(
-                    "主动私聊插件被开发者通过 /主动测试 命令强制触发,必须真的发出一条主动消息以验证链路"
-                    if force
-                    else "主动私聊插件唤醒,由你自行判断是否真的要发起"
-                ),
-                priority="high" if force else "normal",
-                metadata={
-                    "plugin": "proactive_chat_plugin",
-                    "snapshot": snapshot,
-                    "whitelist_identity": whitelist_entry.identity if whitelist_entry else "",
-                    "force_triggered": force,
-                },
+                reason="",
+                priority="",
+                metadata=None,
             )
         except Exception:
             self.ctx.logger.exception(f"投递 maisaka.proactive.trigger 异常 stream={stream_id}")
@@ -779,141 +774,55 @@ class ProactiveChatPlugin(MaiBotPlugin):
         *,
         force: bool = False,
     ) -> str:
-        """组装 intent 文本。
+        """组装 intent 文本(极简版)。
 
-        刻意只摆事实(对方身份、当前情境、外部世界),不预设动机/口吻/话题,
-        把"是否聊、聊什么、用什么称呼"完整交还给 MaiSaka。
-
-        force=True 时(由 /主动测试 命令触发)会切换为"强制执行"措辞:
-        堵掉"保持沉默"退路,明确要求 LLM 真的发出一条消息以验证链路。
+        chat_history 已经包含的事实就不再重复:时间(合成块有"当前时间")、
+        对方 user_id(合成块【本次回复目标】有用户名)、identity(replyer system 里
+        <identity> 已注入)、沉默时长/最后一句(chat_history 真实消息原话都在)。
+        只保留 chat_history 里没有的"外部世界"信号 + 一行最小工具提示 +
+        force 标记。决策框完全砍掉,planner 看完事实自己判断。
         """
-        user_id = str(stream.get("user_id") or "").strip() or "对方"
+        del stream  # user_id 没用了
+
         identity = whitelist_entry.identity.strip() if whitelist_entry else ""
 
-        # 对方信息段
-        if identity:
-            who_line = f"对方账号是 {user_id},在你这里登记的身份是「{identity}」。"
-        else:
-            who_line = f"对方账号是 {user_id}。"
-
-        # 沉默时长段
-        silence_hours = snapshot.get("silence_hours")
-        if silence_hours is None:
-            silence_line = "你们之前没有可见的聊天记录。"
-        elif silence_hours < 1:
-            silence_line = "你们刚刚还聊过没多久。"
-        else:
-            silence_line = f"你们上一次聊天大约是 {silence_hours} 小时前。"
-
-        # 最近一句段
-        recent = snapshot.get("recent_messages") or []
-        if recent:
-            last_text = str(recent[-1].get("text") or "").strip()
-            last_line = f'你印象里最后一句话是:"{last_text}"\n' if last_text else ""
-        else:
-            last_line = ""
-
-        # 外部世界段(按段拼装,空段不显示)
+        # 外部世界事实(chat_history 里没有,replyer 也可能用):时段/节日/天气/热点
         external_lines: list[str] = []
         if snapshot.get("time_semantics"):
-            external_lines.append(f"- 当下时段:{snapshot['time_semantics']}")
+            external_lines.append(f"- 时段:{snapshot['time_semantics']}")
         if snapshot.get("festival"):
             external_lines.append(f"- 日历:{snapshot['festival']}")
         if snapshot.get("weather"):
             external_lines.append(f"- 天气:{snapshot['weather']}")
         if snapshot.get("hot_topics"):
             topics_text = "\n".join(f"  · {item}" for item in snapshot["hot_topics"])
-            external_lines.append(f"- 今日热点(现实世界正在聊的):\n{topics_text}")
-        external_block = (
-            "外部世界此刻是这样的(仅作背景参考,不要为了用上它而硬扯进话题):\n"
-            + "\n".join(external_lines)
-            + "\n"
-            if external_lines
-            else ""
-        )
+            external_lines.append(f"- 今日热点:\n{topics_text}")
+        external_block = "\n".join(external_lines) + "\n" if external_lines else ""
 
-        # reply 工具的 msg_id 提示。
-        # 主程序对插件主动任务的处理:把 task_id 写进 chat_history,但没挂
-        # original_message。结果 reply 工具用 task_id 找不到目标消息会失败。
-        # 插件能看到 DB 里的最近消息,但看不到 MaiSaka 运行时的 _chat_history,
-        # 不能担保从 DB 拿到的 msg_id 当前还在 chat_history 里。
-        # 所以把"哪个 msg_id 可用"的判断权完全交还给 LLM —— 它能直接看 chat_history。
+        # 极简工具提示 ——只给 planner 看,一行内说清 msg_id/send_emoji/finish 用法。
+        # 历史背景:主程序 enqueue_proactive_task 没给 anchor 挂 original_message,
+        # reply 用 task_id 必失败,必须引导 LLM 用聊天历史里真实 msg_id。
         latest_user_msg_id = str(snapshot.get("latest_user_msg_id") or "").strip()
-        candidate_line = (
-            f'(参考:数据库里对方最近一条真实消息 msg_id="{latest_user_msg_id}",\n'
-            "但当前聊天历史可能已被裁剪,不一定还在,需要你自己核对。)\n"
+        msg_id_hint = (
+            f"候选 msg_id={latest_user_msg_id}(需核对仍在历史里),"
             if latest_user_msg_id
             else ""
         )
         if force:
-            # 测试触发时禁掉 finish/no_action 退路:必须至少发一条可见消息。
             tool_hint = (
-                "工具使用提示【强制测试模式】:这条任务是开发者通过 /主动测试 命令\n"
-                "强制触发的,目的就是验证主动私聊链路。你必须真的发出一条可见消息,\n"
-                "不允许调用 finish / no_action 跳过。任务上下文里出现的 id 是任务\n"
-                "编号,不是 msg_id,绝对不能传给 reply ——会报『未找到要回复的目标消息』。\n"
-                f"{candidate_line}"
-                "按下面顺序选发送方式:\n"
-                "  1. 头顶聊天历史里有对方真实发的 <message msg_id=\"...\" user=\"对方名\">\n"
-                "     标签时,挑一条接续,把它的 msg_id 填给 reply,set_quote=false。\n"
-                "  2. 历史里只有命令(/xxx)/系统提示/本任务痕迹时,reply 用不了,\n"
-                "     直接调用 send_emoji 发一张表情 —— 这是底线,必须发。\n"
-                "     send_emoji 不需要 msg_id,只挑一张符合此刻心情/情境的就行。\n"
+                f"【强制测试】必须发,禁 finish/no_action。"
+                f"reply 用聊天历史中对方真实 msg_id(不是本任务 id),{msg_id_hint}"
+                f"set_quote=false;不可用调 send_emoji。"
             )
+            target_line = f"主动找「{identity}」。\n" if identity else "主动私聊触发。\n"
         else:
             tool_hint = (
-                "工具使用提示:这条任务由插件投递,任务上下文里出现的 id 是任务编号,\n"
-                "不是普通用户消息的 msg_id,绝对不能传给 reply 工具的 msg_id 参数 ——\n"
-                "否则会报『未找到要回复的目标消息』。\n"
-                f"{candidate_line}"
-                "如果你决定主动开口,按以下顺序选择:\n"
-                "  1. 抬头看你头顶的聊天历史。如果里面能找到对方真实发的\n"
-                '     <message msg_id="..." user="对方名"> 标签,挑一条值得接续的,\n'
-                "     把它的 msg_id 填给 reply,set_quote=false(主动话题不必引用某句)。\n"
-                "  2. 历史里只有命令(/xxx)、系统提示、本任务自身的痕迹,\n"
-                "     没有可作为接续目标的对方真实消息时,reply 工具用不了,\n"
-                "     请改用 send_emoji 发一张表情作低姿态的开场。\n"
-                "  3. 实在没合适的目标、或当下不想接触,直接 finish 或 no_action 收手 ——\n"
-                "     什么都不做也是正确答案,远比错误调用 reply 体面。\n"
+                f"reply 用聊天历史中对方真实 msg_id(不是本任务 id),{msg_id_hint}"
+                f"set_quote=false;不可用调 send_emoji;无念头 finish。"
             )
+            target_line = f"主动找「{identity}」。\n" if identity else "主动私聊触发。\n"
 
-        if force:
-            decision_block = (
-                "【强制测试模式】这是开发者通过 /主动测试 命令触发的一次链路验证,\n"
-                "目标是真的发出一条主动消息。不要选择沉默、不要 finish、不要 no_action。\n\n"
-                "开口的方式仍由你决定:话题、语气、称呼,按你自己的人设和当下心情来。\n"
-                "如果一时没有强烈的内心冲动,可以直接从下面任意外部素材里挑一个开场:\n"
-                "  · 当下时段的氛围(早晚/工作日周末)\n"
-                "  · 今天的节日或临近节日\n"
-                "  · 天气\n"
-                "  · 今日热点里某条你愿意聊的\n"
-                "这些在平时只在真有感而发时才借用,但这次是测试,**大胆借用**。\n"
-                "若一句话都想不出,至少调 send_emoji 发一张表情 —— 这是测试的底线。\n"
-            )
-        else:
-            decision_block = (
-                "请你停下来,把自己放进这一刻 —— 你当下的状态、对方在你心里的位置、"
-                "最近这段对话留给你的感受 —— 然后问问自己:\n"
-                "我现在,真的想主动找对方聊吗?为什么?\n\n"
-                "如果想,完全由你决定开口的方式 —— 说什么、用什么语气、聊哪个角度、"
-                "怎么称呼对方,都按你自己当下的真实念头来。话题可以是任何东西:\n"
-                "  · 你自己刚经历的事、突然想到的回忆、一个梦、一个新发现的爱好;\n"
-                "  · 对方上次没说完的话、你一直惦记的某件事、单纯的问候和撒娇;\n"
-                "  · 上面外部世界里某条让你有真实感受的事,但只在你真的有感而发时再聊。\n"
-                "完全不挂钩外部世界、纯粹从人设和心情自然冒出的开场,是被鼓励的。\n"
-                "身份信息只是事实,不要被字面绑死,也不要为了完成任务而硬找话题。\n\n"
-                "如果不想(没念头、觉得不合适、对方此刻应该在忙、或单纯不想),就保持沉默,"
-                "什么都不做也是正确答案。\n"
-            )
-
-        return (
-            f"现在是 {snapshot['now']}({snapshot['weekday']})。\n"
-            f"{who_line}{silence_line}\n"
-            f"{last_line}"
-            f"{external_block}\n"
-            f"{decision_block}\n"
-            f"{tool_hint}"
-        )
+        return f"{target_line}{external_block}{tool_hint}"
 
     # ----------------------------- 状态持久化 -----------------------------
 

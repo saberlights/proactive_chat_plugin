@@ -156,17 +156,17 @@ def test_intent_text():
             snapshot=snapshot_full,
         )
         assert_in("哥哥", text_full, "intent 含身份")
-        assert_in("36.5 小时前", text_full, "intent 含沉默时长")
-        assert_in("演讲准备到一半", text_full, "intent 含最后一句")
         assert_in("AI 又出新模型", text_full, "intent 含热点")
-        assert_in("背景参考", text_full, "intent 含'背景参考'解绑")
-        assert_in("被鼓励", text_full, "intent 含'被鼓励'解绑")
-        assert_in("保持沉默", text_full, "intent 含'保持沉默'否决权")
         assert_in("real-msg-id-9527", text_full, "intent 暴露 msg_id 候选给 LLM 核对")
-        assert_in("reply 工具", text_full, "intent 提到 reply 工具用法")
-        assert_in("需要你自己核对", text_full, "强调 LLM 需自行核对而非盲用")
-        assert_in("send_emoji", text_full, "提供 send_emoji 兜底路径")
-        assert_in("finish", text_full, "提供 finish 兜底路径")
+        assert_in("reply", text_full, "intent 提到 reply 工具用法")
+        assert_in("send_emoji", text_full, "提供 send_emoji 兜底")
+        assert_in("finish", text_full, "无念头时 finish 退路")
+        # v0.1.4 极简后: chat_history 里已有的事实(时间/user_id/沉默时长/最后一句)
+        # 都从 intent 砍掉,只保留 chat_history 无的"外部世界"事实 + 一行工具提示
+        assert_true("36.5 小时前" not in text_full, "沉默时长不再注入(chat_history 有时间戳)")
+        assert_true("演讲准备到一半" not in text_full, "最后一句不再注入(chat_history 里有)")
+        assert_true("584232670" not in text_full, "user_id 不再注入(合成块【本次回复目标】有)")
+        assert_true(len(text_full) < 500, f"intent 主体已极简(当前 {len(text_full)} 字)")
 
         snapshot_empty = {
             "now": "2026-05-16T20:00:00",
@@ -184,11 +184,9 @@ def test_intent_text():
             whitelist_entry=None,
             snapshot=snapshot_empty,
         )
-        assert_in("584232670", text_empty, "无身份时直接用 user_id")
-        assert_in("没有可见的聊天记录", text_empty, "无历史时友好提示")
-        assert_true("外部世界此刻是这样的" not in text_empty, "外部世界全空时不输出整段")
-        assert_in("send_emoji", text_empty, "无 msg_id 时引导 send_emoji 兜底")
-        assert_in("finish", text_empty, "无 msg_id 时也提示 finish 退路")
+        assert_in("主动私聊触发", text_empty, "无身份时给出泛触发标识")
+        assert_true("外部世界" not in text_empty, "外部世界全空时不输出整段")
+        assert_in("send_emoji", text_empty, "无 msg_id 时仍引导 send_emoji 兜底")
 
 
 def test_extract_latest_user_message_id():
@@ -412,10 +410,9 @@ def test_full_sweep_pipeline():
 
             last_584 = captured["qq:user:584232670"]
             assert_in("哥哥", last_584["intent"], "intent 含身份")
-            assert_in("36.0 小时前", last_584["intent"], "intent 含沉默时长")
-            assert_in("演讲准备到一半", last_584["intent"], "intent 含最后一句")
-            assert_eq(last_584["metadata"]["whitelist_identity"], "哥哥", "metadata 含 identity")
-            assert_true("snapshot" in last_584["metadata"], "metadata 含 snapshot")
+            assert_eq(last_584["reason"], "", "reason 空(主程序会跳过这一行,省 token)")
+            assert_eq(last_584["priority"], "", "priority 空(同上)")
+            assert_eq(last_584["metadata"], None, "metadata 为 None(主程序会跳过附加信息 JSON)")
     asyncio.run(run())
 
 
@@ -515,19 +512,18 @@ def test_force_bypasses_all_gating():
 
             assert_eq(captured.get("stream_id"), "qq:user:584232670", "force 触发到正确 stream")
             assert_in("哥哥", str(captured.get("intent", "")), "force 仍注入白名单 identity")
-            meta = captured.get("metadata", {})
-            assert_eq(meta.get("force_triggered"), True, "metadata.force_triggered=True")  # type: ignore
-            assert_in("/主动测试", str(captured.get("reason", "")), "reason 标注 /主动测试 来源")
-            assert_in("必须真的发出", str(captured.get("reason", "")), "reason 强调强制发送")
-            assert_eq(captured.get("priority"), "high", "force 模式 priority=high")
-            # force 模式 intent 文本必须堵掉"保持沉默/finish"退路并要求实际发送
+            assert_eq(captured.get("reason"), "", "force 模式 reason 也传空(瘦身)")
+            assert_eq(captured.get("priority"), "", "force 模式 priority 也传空(瘦身)")
+            assert_eq(captured.get("metadata"), None, "force 模式 metadata 传 None(瘦身)")
+            # force 信号现在只在 intent 文本里:必须真发,禁掉 finish/no_action
             intent_text = str(captured.get("intent", ""))
-            assert_in("强制测试模式", intent_text, "intent 头部标注强制测试模式")
-            assert_in("不要 finish", intent_text, "intent 明确禁止 finish")
-            assert_in("send_emoji", intent_text, "intent 给出 send_emoji 作底线发送")
+            assert_in("强制测试", intent_text, "intent 含强制测试标记")
+            assert_in("必须发", intent_text, "intent 明确要求必须发")
+            assert_in("finish", intent_text, "intent 提到不允许 finish")
+            assert_in("send_emoji", intent_text, "intent 含 send_emoji 兜底")
             assert_true(
-                "什么都不做也是正确答案" not in intent_text,
-                "force 模式下不再保留'什么都不做也是正确答案'的退路",
+                "保持沉默" not in intent_text,
+                "force 模式下不再保留'保持沉默'的退路",
             )
 
     asyncio.run(run())
@@ -556,8 +552,12 @@ def test_force_works_for_non_whitelisted():
                 force=True,
             )
             assert_eq(captured.get("stream_id"), "qq:user:8888", "非白名单 force 触发成功")
-            meta = captured.get("metadata", {})
-            assert_eq(meta.get("whitelist_identity"), "", "无白名单时 identity 为空")  # type: ignore
+            assert_eq(captured.get("metadata"), None, "无白名单 force 时 metadata 也是 None")
+            # 没有白名单 identity 时 intent 不会出现「...」身份段
+            assert_true(
+                "「" not in str(captured.get("intent", "")),
+                "无白名单时 intent 不带 identity 段",
+            )
 
     asyncio.run(run())
 
