@@ -95,9 +95,13 @@ uv run plugins/proactive_chat_plugin/tests/test_integration.py
 
 **根因**：主程序 `src/maisaka/runtime.py` 的 `enqueue_proactive_task` 把 task 作为 `SessionBackedMessage` 写入 `_chat_history` 时没设置 `original_message`，单独保存的 `_proactive_anchor_message` 又不在 chat history 里，所以 `reply` 工具用 task_id 查不到目标。
 
-**插件侧绕过**：本插件在 `intent` 文本里显式喂给 LLM 一条对方最近的真实用户消息 `msg_id`，并明确告诉它"task 编号不能当 msg_id 用，要 reply 请用 X，否则改走 send_emoji / finish"。
+**插件侧绕过**：本插件在 `intent` 文本里：
+1. 明确告诉 LLM"任务编号不能当 msg_id 用，会报『未找到要回复的目标消息』"；
+2. 把 DB 里对方最近一条真实消息 `msg_id` 作为**候选**列出来，并强调"当前 chat_history 可能已被裁剪，需要 LLM 自己核对"——插件能看 DB 但看不到 MaiSaka 运行时的 `_chat_history`，所以不能担保候选可用；
+3. 引导 LLM 直接看头顶聊天历史，从 `<message msg_id="..." user="对方名">` 标签里挑一条值得接续的；
+4. 历史里只有命令 / 系统提示时，引导 LLM 退到 `send_emoji` 发表情，或 `finish` / `no_action` 收手。
 
-绕过有局限：如果对方从来没给 bot 发过消息（如插件首次通过 `chat.open_session` 新开会话），就没有可用的真实 msg_id，此时 LLM 会按提示退到 send_emoji 或直接放弃。真正的修复需要改主程序，让 `enqueue_proactive_task` 把 anchor message 挂到 chat history 的 `original_message` 字段上。
+**绕过的局限**：如果当前 `_chat_history` 里没有任何对方的真实对话消息（如插件首次通过 `chat.open_session` 新开会话、或聊天历史只剩 `/xxx` 命令），LLM 会按提示退到 `send_emoji` 或直接放弃 ——**没有真正可作锚点的消息时，文字主动消息是发不出去的**。真正修复需要改主程序，让 `enqueue_proactive_task` 把 anchor message 挂到 chat history 的 `original_message` 字段上。
 
 ## License
 

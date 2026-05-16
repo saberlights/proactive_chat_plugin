@@ -162,8 +162,11 @@ def test_intent_text():
         assert_in("背景参考", text_full, "intent 含'背景参考'解绑")
         assert_in("被鼓励", text_full, "intent 含'被鼓励'解绑")
         assert_in("保持沉默", text_full, "intent 含'保持沉默'否决权")
-        assert_in("real-msg-id-9527", text_full, "intent 暴露真实 msg_id 给 LLM")
+        assert_in("real-msg-id-9527", text_full, "intent 暴露 msg_id 候选给 LLM 核对")
         assert_in("reply 工具", text_full, "intent 提到 reply 工具用法")
+        assert_in("需要你自己核对", text_full, "强调 LLM 需自行核对而非盲用")
+        assert_in("send_emoji", text_full, "提供 send_emoji 兜底路径")
+        assert_in("finish", text_full, "提供 finish 兜底路径")
 
         snapshot_empty = {
             "now": "2026-05-16T20:00:00",

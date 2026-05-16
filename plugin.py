@@ -828,26 +828,33 @@ class ProactiveChatPlugin(MaiBotPlugin):
         )
 
         # reply 工具的 msg_id 提示。
-        # 当前主程序对插件主动任务的处理:把 task_id 写进 chat_history,但没挂
+        # 主程序对插件主动任务的处理:把 task_id 写进 chat_history,但没挂
         # original_message。结果 reply 工具用 task_id 找不到目标消息会失败。
-        # 这里给 LLM 一条明确的"使用哪个 msg_id"的指引,避免它误用 task_id。
+        # 插件能看到 DB 里的最近消息,但看不到 MaiSaka 运行时的 _chat_history,
+        # 不能担保从 DB 拿到的 msg_id 当前还在 chat_history 里。
+        # 所以把"哪个 msg_id 可用"的判断权完全交还给 LLM —— 它能直接看 chat_history。
         latest_user_msg_id = str(snapshot.get("latest_user_msg_id") or "").strip()
-        if latest_user_msg_id:
-            tool_hint = (
-                "工具使用提示:这条任务由插件投递,任务上下文里出现的 id 是任务编号,\n"
-                "不是普通用户消息的 msg_id,不能传给 reply 工具的 msg_id 参数。\n"
-                f'如果你决定主动开口并需要调用 reply,请把 msg_id 填成 "{latest_user_msg_id}"\n'
-                "(对方最近一条真实用户消息的编号);set_quote 建议设为 false,因为这是\n"
-                "你主动开启的话题,不是在引用对方那一句。\n"
-            )
-        else:
-            tool_hint = (
-                "工具使用提示:这条任务由插件投递,任务上下文里出现的 id 是任务编号,\n"
-                "不是普通用户消息的 msg_id,不能传给 reply 工具的 msg_id 参数。\n"
-                "此刻聊天历史里没有可用的对方真实用户消息,reply 工具用不了。\n"
-                "如果你确实想接触,优先调用 send_emoji 发一张表情作为低姿态的开场,\n"
-                "也可以直接 finish 或 no_action 收手 —— 这两个都比错误调用 reply 体面。\n"
-            )
+        candidate_line = (
+            f'(参考:数据库里对方最近一条真实消息 msg_id="{latest_user_msg_id}",\n'
+            "但当前聊天历史可能已被裁剪,不一定还在,需要你自己核对。)\n"
+            if latest_user_msg_id
+            else ""
+        )
+        tool_hint = (
+            "工具使用提示:这条任务由插件投递,任务上下文里出现的 id 是任务编号,\n"
+            "不是普通用户消息的 msg_id,绝对不能传给 reply 工具的 msg_id 参数 ——\n"
+            "否则会报『未找到要回复的目标消息』。\n"
+            f"{candidate_line}"
+            "如果你决定主动开口,按以下顺序选择:\n"
+            "  1. 抬头看你头顶的聊天历史。如果里面能找到对方真实发的\n"
+            '     <message msg_id="..." user="对方名"> 标签,挑一条值得接续的,\n'
+            "     把它的 msg_id 填给 reply,set_quote=false(主动话题不必引用某句)。\n"
+            "  2. 历史里只有命令(/xxx)、系统提示、本任务自身的痕迹,\n"
+            "     没有可作为接续目标的对方真实消息时,reply 工具用不了,\n"
+            "     请改用 send_emoji 发一张表情作低姿态的开场。\n"
+            "  3. 实在没合适的目标、或当下不想接触,直接 finish 或 no_action 收手 ——\n"
+            "     什么都不做也是正确答案,远比错误调用 reply 体面。\n"
+        )
 
         return (
             f"现在是 {snapshot['now']}({snapshot['weekday']})。\n"
