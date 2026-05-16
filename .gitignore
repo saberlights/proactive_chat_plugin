@@ -1,0 +1,7 @@
+state.json
+__pycache__/
+*.pyc
+*.bak
+.claude/
+# 实际配置由宿主从默认值生成,不入库,避免泄露白名单 user_id 等个人信息。
+config.toml

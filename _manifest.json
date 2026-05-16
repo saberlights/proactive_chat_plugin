@@ -1,0 +1,41 @@
+{
+  "manifest_version": 2,
+  "version": "0.1.1",
+  "name": "主动私聊插件 (Proactive Chat Plugin)",
+  "description": "在合适的时机不规律地唤醒 MaiSaka,让她自己决定是否要主动找某个私聊对象聊天。插件不预设动机、内容或口吻,只构造原始情境快照,由 MaiSaka 的人设决定一切。仅限私聊场景。",
+  "author": {
+    "name": "久远",
+    "url": "https://github.com/saberlights"
+  },
+  "license": "GPL-v3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/saberlights/proactive_chat_plugin",
+    "homepage": "https://github.com/saberlights/proactive_chat_plugin",
+    "documentation": "https://docs.mai-mai.org/develop/",
+    "issues": "https://github.com/saberlights/proactive_chat_plugin/issues"
+  },
+  "host_application": {
+    "min_version": "0.11.0",
+    "max_version": "1.0.0"
+  },
+  "sdk": {
+    "min_version": "2.4.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "chat.get_private_streams",
+    "chat.get_stream_by_user_id",
+    "chat.open_session",
+    "message.get_by_time_in_chat",
+    "maisaka.proactive.trigger",
+    "send.text"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "id": "maibot-community.proactive-chat-plugin"
+}
