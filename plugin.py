@@ -456,7 +456,7 @@ class ProactiveChatPlugin(MaiBotPlugin):
                 return
 
         snapshot = await self._build_context_snapshot(stream_id, stream)
-        intent_text = self._build_intent_text(stream, whitelist_entry, snapshot)
+        intent_text = self._build_intent_text(stream, whitelist_entry, snapshot, force=force)
 
         try:
             result = await self.ctx.call_capability(
@@ -464,11 +464,11 @@ class ProactiveChatPlugin(MaiBotPlugin):
                 stream_id=stream_id,
                 intent=intent_text,
                 reason=(
-                    "主动私聊插件被开发者手动测试触发,由你自行判断是否真的要发起"
+                    "主动私聊插件被开发者通过 /主动测试 命令强制触发,必须真的发出一条主动消息以验证链路"
                     if force
                     else "主动私聊插件唤醒,由你自行判断是否真的要发起"
                 ),
-                priority="normal",
+                priority="high" if force else "normal",
                 metadata={
                     "plugin": "proactive_chat_plugin",
                     "snapshot": snapshot,
@@ -776,11 +776,16 @@ class ProactiveChatPlugin(MaiBotPlugin):
         stream: dict[str, Any],
         whitelist_entry: WhitelistEntry | None,
         snapshot: dict[str, Any],
+        *,
+        force: bool = False,
     ) -> str:
         """组装 intent 文本。
 
         刻意只摆事实(对方身份、当前情境、外部世界),不预设动机/口吻/话题,
         把"是否聊、聊什么、用什么称呼"完整交还给 MaiSaka。
+
+        force=True 时(由 /主动测试 命令触发)会切换为"强制执行"措辞:
+        堵掉"保持沉默"退路,明确要求 LLM 真的发出一条消息以验证链路。
         """
         user_id = str(stream.get("user_id") or "").strip() or "对方"
         identity = whitelist_entry.identity.strip() if whitelist_entry else ""
@@ -840,39 +845,73 @@ class ProactiveChatPlugin(MaiBotPlugin):
             if latest_user_msg_id
             else ""
         )
-        tool_hint = (
-            "工具使用提示:这条任务由插件投递,任务上下文里出现的 id 是任务编号,\n"
-            "不是普通用户消息的 msg_id,绝对不能传给 reply 工具的 msg_id 参数 ——\n"
-            "否则会报『未找到要回复的目标消息』。\n"
-            f"{candidate_line}"
-            "如果你决定主动开口,按以下顺序选择:\n"
-            "  1. 抬头看你头顶的聊天历史。如果里面能找到对方真实发的\n"
-            '     <message msg_id="..." user="对方名"> 标签,挑一条值得接续的,\n'
-            "     把它的 msg_id 填给 reply,set_quote=false(主动话题不必引用某句)。\n"
-            "  2. 历史里只有命令(/xxx)、系统提示、本任务自身的痕迹,\n"
-            "     没有可作为接续目标的对方真实消息时,reply 工具用不了,\n"
-            "     请改用 send_emoji 发一张表情作低姿态的开场。\n"
-            "  3. 实在没合适的目标、或当下不想接触,直接 finish 或 no_action 收手 ——\n"
-            "     什么都不做也是正确答案,远比错误调用 reply 体面。\n"
-        )
+        if force:
+            # 测试触发时禁掉 finish/no_action 退路:必须至少发一条可见消息。
+            tool_hint = (
+                "工具使用提示【强制测试模式】:这条任务是开发者通过 /主动测试 命令\n"
+                "强制触发的,目的就是验证主动私聊链路。你必须真的发出一条可见消息,\n"
+                "不允许调用 finish / no_action 跳过。任务上下文里出现的 id 是任务\n"
+                "编号,不是 msg_id,绝对不能传给 reply ——会报『未找到要回复的目标消息』。\n"
+                f"{candidate_line}"
+                "按下面顺序选发送方式:\n"
+                "  1. 头顶聊天历史里有对方真实发的 <message msg_id=\"...\" user=\"对方名\">\n"
+                "     标签时,挑一条接续,把它的 msg_id 填给 reply,set_quote=false。\n"
+                "  2. 历史里只有命令(/xxx)/系统提示/本任务痕迹时,reply 用不了,\n"
+                "     直接调用 send_emoji 发一张表情 —— 这是底线,必须发。\n"
+                "     send_emoji 不需要 msg_id,只挑一张符合此刻心情/情境的就行。\n"
+            )
+        else:
+            tool_hint = (
+                "工具使用提示:这条任务由插件投递,任务上下文里出现的 id 是任务编号,\n"
+                "不是普通用户消息的 msg_id,绝对不能传给 reply 工具的 msg_id 参数 ——\n"
+                "否则会报『未找到要回复的目标消息』。\n"
+                f"{candidate_line}"
+                "如果你决定主动开口,按以下顺序选择:\n"
+                "  1. 抬头看你头顶的聊天历史。如果里面能找到对方真实发的\n"
+                '     <message msg_id="..." user="对方名"> 标签,挑一条值得接续的,\n'
+                "     把它的 msg_id 填给 reply,set_quote=false(主动话题不必引用某句)。\n"
+                "  2. 历史里只有命令(/xxx)、系统提示、本任务自身的痕迹,\n"
+                "     没有可作为接续目标的对方真实消息时,reply 工具用不了,\n"
+                "     请改用 send_emoji 发一张表情作低姿态的开场。\n"
+                "  3. 实在没合适的目标、或当下不想接触,直接 finish 或 no_action 收手 ——\n"
+                "     什么都不做也是正确答案,远比错误调用 reply 体面。\n"
+            )
+
+        if force:
+            decision_block = (
+                "【强制测试模式】这是开发者通过 /主动测试 命令触发的一次链路验证,\n"
+                "目标是真的发出一条主动消息。不要选择沉默、不要 finish、不要 no_action。\n\n"
+                "开口的方式仍由你决定:话题、语气、称呼,按你自己的人设和当下心情来。\n"
+                "如果一时没有强烈的内心冲动,可以直接从下面任意外部素材里挑一个开场:\n"
+                "  · 当下时段的氛围(早晚/工作日周末)\n"
+                "  · 今天的节日或临近节日\n"
+                "  · 天气\n"
+                "  · 今日热点里某条你愿意聊的\n"
+                "这些在平时只在真有感而发时才借用,但这次是测试,**大胆借用**。\n"
+                "若一句话都想不出,至少调 send_emoji 发一张表情 —— 这是测试的底线。\n"
+            )
+        else:
+            decision_block = (
+                "请你停下来,把自己放进这一刻 —— 你当下的状态、对方在你心里的位置、"
+                "最近这段对话留给你的感受 —— 然后问问自己:\n"
+                "我现在,真的想主动找对方聊吗?为什么?\n\n"
+                "如果想,完全由你决定开口的方式 —— 说什么、用什么语气、聊哪个角度、"
+                "怎么称呼对方,都按你自己当下的真实念头来。话题可以是任何东西:\n"
+                "  · 你自己刚经历的事、突然想到的回忆、一个梦、一个新发现的爱好;\n"
+                "  · 对方上次没说完的话、你一直惦记的某件事、单纯的问候和撒娇;\n"
+                "  · 上面外部世界里某条让你有真实感受的事,但只在你真的有感而发时再聊。\n"
+                "完全不挂钩外部世界、纯粹从人设和心情自然冒出的开场,是被鼓励的。\n"
+                "身份信息只是事实,不要被字面绑死,也不要为了完成任务而硬找话题。\n\n"
+                "如果不想(没念头、觉得不合适、对方此刻应该在忙、或单纯不想),就保持沉默,"
+                "什么都不做也是正确答案。\n"
+            )
 
         return (
             f"现在是 {snapshot['now']}({snapshot['weekday']})。\n"
             f"{who_line}{silence_line}\n"
             f"{last_line}"
             f"{external_block}\n"
-            "请你停下来,把自己放进这一刻 —— 你当下的状态、对方在你心里的位置、"
-            "最近这段对话留给你的感受 —— 然后问问自己:\n"
-            "我现在,真的想主动找对方聊吗?为什么?\n\n"
-            "如果想,完全由你决定开口的方式 —— 说什么、用什么语气、聊哪个角度、"
-            "怎么称呼对方,都按你自己当下的真实念头来。话题可以是任何东西:\n"
-            "  · 你自己刚经历的事、突然想到的回忆、一个梦、一个新发现的爱好;\n"
-            "  · 对方上次没说完的话、你一直惦记的某件事、单纯的问候和撒娇;\n"
-            "  · 上面外部世界里某条让你有真实感受的事,但只在你真的有感而发时再聊。\n"
-            "完全不挂钩外部世界、纯粹从人设和心情自然冒出的开场,是被鼓励的。\n"
-            "身份信息只是事实,不要被字面绑死,也不要为了完成任务而硬找话题。\n\n"
-            "如果不想(没念头、觉得不合适、对方此刻应该在忙、或单纯不想),就保持沉默,"
-            "什么都不做也是正确答案。\n\n"
+            f"{decision_block}\n"
             f"{tool_hint}"
         )
 

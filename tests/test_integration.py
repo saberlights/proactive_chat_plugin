@@ -517,7 +517,18 @@ def test_force_bypasses_all_gating():
             assert_in("哥哥", str(captured.get("intent", "")), "force 仍注入白名单 identity")
             meta = captured.get("metadata", {})
             assert_eq(meta.get("force_triggered"), True, "metadata.force_triggered=True")  # type: ignore
-            assert_in("开发者手动测试", str(captured.get("reason", "")), "reason 标注手动测试")
+            assert_in("/主动测试", str(captured.get("reason", "")), "reason 标注 /主动测试 来源")
+            assert_in("必须真的发出", str(captured.get("reason", "")), "reason 强调强制发送")
+            assert_eq(captured.get("priority"), "high", "force 模式 priority=high")
+            # force 模式 intent 文本必须堵掉"保持沉默/finish"退路并要求实际发送
+            intent_text = str(captured.get("intent", ""))
+            assert_in("强制测试模式", intent_text, "intent 头部标注强制测试模式")
+            assert_in("不要 finish", intent_text, "intent 明确禁止 finish")
+            assert_in("send_emoji", intent_text, "intent 给出 send_emoji 作底线发送")
+            assert_true(
+                "什么都不做也是正确答案" not in intent_text,
+                "force 模式下不再保留'什么都不做也是正确答案'的退路",
+            )
 
     asyncio.run(run())
 
