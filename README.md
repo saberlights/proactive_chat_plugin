@@ -103,6 +103,22 @@ uv run plugins/proactive_chat_plugin/tests/test_integration.py
 
 **绕过的局限**：如果当前 `_chat_history` 里没有任何对方的真实对话消息（如插件首次通过 `chat.open_session` 新开会话、或聊天历史只剩 `/xxx` 命令），LLM 会按提示退到 `send_emoji` 或直接放弃 ——**没有真正可作锚点的消息时，文字主动消息是发不出去的**。真正修复需要改主程序，让 `enqueue_proactive_task` 把 anchor message 挂到 chat history 的 `original_message` 字段上。
 
+### 什么时候 proactive 文字消息能正常发？
+
+`reply` 工具要成功，需要 `_chat_history` 里有一条**带 `original_message` 的真实用户消息**作为锚点。这就要求：
+
+✅ **正常工作的条件**：对方在**当前 MaiSaka 进程生命周期内**给 bot 发过至少一条普通对话消息（不是 `/xxx` 命令），且这条消息没被 context 裁剪掉。真实用户消息走 `register_message → _ingest_messages → SessionBackedMessage.from_session_message` 路径，会带 `original_message` 一起挂进 `_chat_history`；proactive 投递后 LLM 在历史里看到它，挑它的 `msg_id` 作为 reply 目标即可。
+
+❌ **下列场景文字 proactive 发不出去，LLM 会退到 `send_emoji` 或 `finish`**：
+- **bot / MaiSaka 重启之后，对方还没说过话**：`_chat_history` 是内存里的 list，重启清零，不会从 DB 预加载历史。
+- **`_chat_history` 被 context 裁剪过头**：消息数超过 `max_context_size` 时老的会被 trim，对方那条消息可能就没了。
+- **插件刚通过 `chat.open_session` 新建 session**：对应 MaiSaka 运行时是空的，直到对方在新 session 里实际发过话。
+- **聊天历史里只剩 `/xxx` 命令**：技术上能查到 `original_message`，但 LLM 通常会判断"这不是真实对话"而选择 `send_emoji` 或 `finish`。
+
+**实操建议**：
+- 想稳定吃 proactive：让对方在 bot 长跑期间发过任意一条普通话（非命令）即可，后续主动文字消息就能正常发出。
+- 想彻底消除这个不确定性：得改主程序 `enqueue_proactive_task` 那 1-2 行，把 anchor 挂到 chat history 的 `original_message` 字段上 —— 那之后 proactive 自带锚点，跟用户有没有发过话无关。
+
 ## License
 
 GPL-v3.0-or-later
